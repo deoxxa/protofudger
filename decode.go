@@ -4,19 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
+	"strings"
 	"time"
 	"unicode/utf8"
-)
-
-var (
-	showAll     = flag.Bool("show_all", false, "Show all possible types instead of just most likely.")
-	showOffsets = flag.Bool("show_offsets", false, "Show byte offsets of each value.")
 )
 
 type pbType int
@@ -28,15 +22,15 @@ const (
 	type32Bit  pbType = 5
 )
 
-func formatKey(k uint64, o int64) string {
-	if *showOffsets {
+func formatKey(k uint64, o int64, showOffsets bool) string {
+	if showOffsets {
 		return fmt.Sprintf("%d @ %d", k, o)
 	}
 
 	return fmt.Sprintf("%d", k)
 }
 
-func decode(input []byte, offset int64, depth int) (int, []string, error) {
+func decode(input []byte, offset int64, depth int, showAll, showOffsets bool) (int, []string, error) {
 	r := bytes.NewReader(input)
 	var a []string
 
@@ -81,17 +75,17 @@ func decode(input []byte, offset int64, depth int) (int, []string, error) {
 
 			switch {
 			case v > 1400000000000 && v < 1500000000000:
-				a = append(a, fmt.Sprintf("%s: (varint, microseconds) %s", formatKey(k, o), time.Unix(int64(v/1000), 0)))
+				a = append(a, fmt.Sprintf("%s: (varint, microseconds) %s", formatKey(k, o, showOffsets), time.Unix(int64(v/1000), 0)))
 			case v > 1400000000 && v < 1500000000:
-				a = append(a, fmt.Sprintf("%s: (varint, milliseconds) %s", formatKey(k, o), time.Unix(int64(v), 0)))
+				a = append(a, fmt.Sprintf("%s: (varint, milliseconds) %s", formatKey(k, o, showOffsets), time.Unix(int64(v), 0)))
 			case uint64(v) == v:
-				a = append(a, fmt.Sprintf("%s: (varint) %d", formatKey(k, o), v))
-			case !*showAll:
-				a = append(a, fmt.Sprintf("%s: (varint) %d OR %d", formatKey(k, o), v, uint64(v)))
+				a = append(a, fmt.Sprintf("%s: (varint) %d", formatKey(k, o, showOffsets), v))
+			case !showAll:
+				a = append(a, fmt.Sprintf("%s: (varint) %d OR %d", formatKey(k, o, showOffsets), v, uint64(v)))
 			}
 
-			if *showAll {
-				a = append(a, fmt.Sprintf("%s: (varint) %d OR %d", formatKey(k, o), v, uint64(v)))
+			if showAll {
+				a = append(a, fmt.Sprintf("%s: (varint) %d OR %d", formatKey(k, o, showOffsets), v, uint64(v)))
 			}
 
 		case type64Bit:
@@ -173,10 +167,14 @@ func decode(input []byte, offset int64, depth int) (int, []string, error) {
 					}
 				}
 
-				a = append(a, fmt.Sprintf("%s: (%s) %s", formatKey(k, o), closestName, closestText))
+				p := formatKey(k, o, showOffsets)
 
-				if *showAll {
-					a = append(a, s...)
+				a = append(a, fmt.Sprintf("%s: (%s) %s", p, closestName, closestText))
+
+				if showAll {
+					for _, e := range s {
+						a = append(a, strings.Repeat(" ", len(p))+e)
+					}
 				}
 			}
 		case typeBytes:
@@ -205,18 +203,18 @@ func decode(input []byte, offset int64, depth int) (int, []string, error) {
 				return n, a, fmt.Errorf("couldn't read enough data")
 			}
 
-			_, ma, merr := decode(v, o, depth+1)
+			_, ma, merr := decode(v, o, depth+1, showAll, showOffsets)
 			if merr == nil {
-				a = append(a, fmt.Sprintf("%s: {", formatKey(k, o)))
+				a = append(a, fmt.Sprintf("%s: {", formatKey(k, o, showOffsets)))
 				for _, s := range ma {
 					a = append(a, "  "+s)
 				}
 				a = append(a, "}")
 			} else {
 				if utf8.ValidString(string(v)) {
-					a = append(a, fmt.Sprintf("%s: (string) %q", formatKey(k, o), string(v)))
+					a = append(a, fmt.Sprintf("%s: (string) %q", formatKey(k, o, showOffsets), string(v)))
 				} else {
-					a = append(a, fmt.Sprintf("%s: (bytes) %s", formatKey(k, o), hex.EncodeToString(v)))
+					a = append(a, fmt.Sprintf("%s: (bytes) %s", formatKey(k, o, showOffsets), hex.EncodeToString(v)))
 				}
 			}
 		case type32Bit:
@@ -298,9 +296,13 @@ func decode(input []byte, offset int64, depth int) (int, []string, error) {
 					}
 				}
 
-				a = append(a, fmt.Sprintf("%s: (%s) %s", formatKey(k, o), closestName, closestText))
-				if *showAll {
-					a = append(a, s...)
+				p := formatKey(k, o, showOffsets)
+
+				a = append(a, fmt.Sprintf("%s: (%s) %s", p, closestName, closestText))
+				if showAll {
+					for _, e := range s {
+						a = append(a, strings.Repeat(" ", len(p))+e)
+					}
 				}
 			}
 		default:
@@ -311,50 +313,14 @@ func decode(input []byte, offset int64, depth int) (int, []string, error) {
 	}
 }
 
-func parseStream(rd io.Reader) error {
-	d, err := ioutil.ReadAll(rd)
-	if err != nil {
-		return err
-	}
-
-	n, lines, err := decode(d, 0, 0)
+func parseBuffer(d []byte, showAll, showOffsets bool) ([]string, error) {
+	n, lines, err := decode(d, 0, 0, showAll, showOffsets)
 	if n > 0 && err == nil {
-		fmt.Printf("decoded %d fields\n", n)
-
-		if err != nil {
-			fmt.Printf("error was %s\n", err.Error())
-		}
-
-		fmt.Printf("\n")
-
-		for _, l := range lines {
-			fmt.Printf("  %s\n", l)
-		}
-
-		fmt.Printf("\n")
+		return append([]string{
+			fmt.Sprintf("decoded %d fields", n),
+			"",
+		}, lines...), nil
 	}
 
-	return err
-}
-
-func main() {
-	flag.Parse()
-
-	if len(flag.Args()) == 0 {
-		parseStream(os.Stdin)
-	}
-
-	for _, f := range flag.Args() {
-		fmt.Printf("parsing %s\n", f)
-
-		func() {
-			fd, err := os.Open(f)
-			if err != nil {
-				panic(err)
-			}
-			defer fd.Close()
-
-			parseStream(fd)
-		}()
-	}
+	return nil, err
 }
